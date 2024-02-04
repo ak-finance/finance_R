@@ -1,0 +1,238 @@
+---
+title: "Introduction to Tidy Finance"
+output: html_notebook
+---
+
+# Working with Stock Market Data
+
+load the required packages.
+
+```{r echo=FALSE, warning=FALSE}
+library(tidyverse)
+library(quantmod)
+library(tidyquant)
+library(scales)
+```
+
+Download daily prices of one stock symbol, e.g. the Suzlon Energy directly from the data provider Yahoo!Finance.
+
+```{r}
+suzlon <- tq_get("SUZLON.NS",
+                 get = "stock.prices",
+                 from = "2019-02-01",
+                 to = "2024-02-02"
+                 )
+glimpse(suzlon)
+```
+
+Visualize the time series of adjusted prices.
+
+```{r}
+suzlon %>% 
+  ggplot(aes(x = date, y = adjusted)) +
+  geom_line() +
+  labs(x = NULL, 
+       y = NULL,
+       title = "Suzlon stock prices beginning of 2019 and end of Jan 2024")
+```
+
+Instead of analyzing prices, we compute daily net reurns defined as
+$r_{t} = \frac {p_{t}} {p_{t-1}} - 1$
+
+where $p_{t}$ is the adjusted day $t$ price.
+
+in that context, the function `lag()` is helpful, which returns the previous value in a vector.
+
+```{r}
+returns <- suzlon %>% 
+  arrange(date) %>% 
+  mutate(ret = adjusted / lag(adjusted) -1) %>% 
+  select(symbol, date, ret)
+
+returns
+```
+
+remove missing values...
+
+```{r}
+returns <- returns %>% 
+  drop_na(ret)
+```
+
+Next,we visualize the distribution of daily returns in a histogram.
+Additionally, we add a dashed line that indicates the 5 percent quantile of the daily returns to the histogram, which is a (crude) proxy for the worst return of the stock with a probability of at most 5 percent.
+The 5 percent quantile is closely connected to the (historical) value-at-risk, a risk measure commonly monitored by regulators.
+
+```{r}
+quantile_05 <- quantile(returns %>% 
+                          pull(ret), probs = 0.05)
+
+returns %>% 
+  ggplot(aes(x = ret)) +
+  geom_histogram(bins= 100) +
+  geom_vline(aes(xintercept = quantile_05),
+             linetype = 'dashed') +
+  labs(x = NULL,
+       y = NULL,
+       title = "Distribution of daily Suzlon stock returns") +
+  scale_x_continuous(labels = percent)
+```
+
+A typical task before proceeding with any data is to compute summary statistics for the main variables of interest.
+
+```{r}
+returns %>% 
+  summarize(across(
+    ret,
+    list(
+      daily_mean = mean,
+      daily_sd = sd,
+      daily_min = min,
+      daily_max = max
+    )
+  ))
+```
+
+Summary statistics can also be computed for each year individually.
+
+```{r}
+returns %>% 
+  group_by(year = year(date)) %>% 
+  summarise(across(
+    ret,
+    list(
+      daily_mean = mean,
+      daily_sd = sd,
+      daily_min = min,
+      daily_max = max
+    ),
+    .names = "{.fn}"
+  )) %>% 
+  print(n = Inf)
+```
+
+Notes: the additional argument `.names = "{.fn}"` in `across()` determines how to name the output columns. The specification is rather flexible and allows almost arbitrary column names, which can be useful for reporting.
+
+# Scaling up the Analysis
+
+```{r}
+# get nifty50 companies symbol
+nifty_stocks <- read_csv("~/Dropbox/openData/stockExchangeData/data/nifty50_feb2024.csv",
+                         col_select = c("nse_symbol", "yahoo_symbol", "Weightage", "Industry"))
+glimpse(nifty_stocks)
+```
+
+get data for nifty stocks
+
+```{r}
+ticks <- nifty_stocks$yahoo_symbol
+tickers <- tq_get(ticks,
+                  get = "stock.prices",
+                  from = "2019-02-01",
+                  to = "2024-02-02"
+                  )
+```
+
+visualize...
+```{r}
+tickers |>
+  ggplot(aes(
+    x = date,
+    y = adjusted,
+    color = symbol
+  )) +
+  geom_line() +
+  labs(
+    x = NULL,
+    y = NULL,
+    color = NULL,
+    title = "Stock prices of NIFTY index constituents"
+  ) +
+  theme(legend.position = "none")
+```
+
+Let's calculate the summary statistics for NIFTY
+
+```{r}
+nifty_returns <- tickers %>% 
+  group_by(symbol) %>% 
+  mutate(ret = adjusted / lag(adjusted) -1) %>% 
+  select(symbol, date, ret) %>% 
+  drop_na(ret)
+
+nifty_returns %>% 
+  group_by(symbol) %>% 
+  summarize(across(
+    ret, list(
+      daily_mean = mean,
+      daily_sd = sd,
+      daily_min = min,
+      daily_max = max
+    ),
+    .names = "{.fn}"
+  )) %>% 
+  print(n = Inf)
+```
+
+Aggregate daily trading volume for NIFTY constituents in INR.
+
+```{r}
+trading_vol <- tickers %>% 
+  group_by(date) %>% 
+  summarize(trading_vol = sum(volume * adjusted))
+
+trading_vol %>% 
+  ggplot(aes(x = date, y = trading_vol)) +
+  geom_line() +
+  labs(
+    x = NULL,
+    y = NULL,
+    title = "Aggregate daily trading volume of NIFTY index constituents"
+  )+
+  scale_y_continuous(labels = unit_format(unit = "Cr", scale = 1e-7))
+```
+
+One way to illustrate the persistence of trading volumes would be to plot volume on day `t` against volume on day `t-1`.
+
+```{r}
+trading_vol %>% 
+  ggplot(aes(x = lag(trading_vol), y = trading_vol)) +
+  geom_point() +
+  geom_abline(aes(intercept = 0, slope = 1),
+              linetype = 'dashed') +
+  labs(
+    x = "Previous day agg. trading volume",
+    y = "Aggregate trading volume",
+    title = "Persistence in daily trading volume of NIFTY index constituents"
+  ) +
+  scale_x_continuous(labels = unit_format(unit = "Cr", scale = 1e-7)) +
+  scale_y_continuous(labels = unit_format(unit = "Cr", scale = 1e-7)) 
+```
+
+# Portfolio choice problems
+
+**mean-variance investor**: higher future returns with less volatility.
+
+*efficient frontier*: tool to evaluate portfolios in the mean-variance context.
+The set of portfolios which satisfies the condition that no other portfolio exists with a higher expected return but with the same volatility(the square root of the variance, i.e. the risk)
+
+First, we extract each asset's monthly returns. we will filter out prices which are not observable every single day.
+
+```{r}
+index_prices <- tickers %>% 
+  group_by(symbol) %>% 
+  mutate(n = n()) %>% 
+  ungroup() %>% 
+  filter(n == max(n)) %>% 
+  select(-n)
+
+index_returns <- index_prices %>% 
+  mutate(month = floor_date(date, "month")) %>% 
+  group_by(symbol, month) %>% 
+  summarize(price = last( adjusted ), .groups = "drop_last") %>% 
+  mutate(ret = price / lag(price) -1) %>% 
+  drop_na(ret) %>% 
+  select(price)
+```
+
+next, we transform
